@@ -1,1 +1,0 @@
-while true; do timeout 60 tcpdump -nn -i any -s150 -w /tmp/traffic-capture/1min.pcap; &> /dev/null; mv /tmp/traffic-capture/1min.pcap /tmp/traffic-capture/1min-`date +"%Y.%m.%d--%H:%M:%S"`.pcap; find /tmp/traffic-capture/* -mmin +360 -exec rm {} \;; echo -n "#1min"; sleep 0.05; done
