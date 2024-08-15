@@ -8,9 +8,11 @@ tags: tcp
 
 tcp面向字节流的可靠链接协议.
 
+![img_1.png](/images/img_1.png)
+
 ## TCP 3次握手.
 
-握手主要是协商option和
+握手主要是协商option，初始化序列号和TCB.
 
 相关优化
 
@@ -21,6 +23,23 @@ sysctl -w net.core.netdev_max_backlog=32768
 sysctl -w net.ipv4.tcp_max_syn_backlog=32768
 sysctl -w net.ipv4.tcp_fastopen=3
 ```
+
+tcpfast_open
+![img_2.png](img_2.png)
+
+tcp_defer_accpet.
+内核等到实际数据包达到时才通知应用读取.
+
+| 配置项                          | 说明                                                                                                                             | 默认值 | 建议值   |
+|------------------------------|--------------------------------------------------------------------------------------------------------------------------------|-----|-------|
+| net.ipv4.tcp_syn_retries     | tcpsyn最大重试次数，超过该次数没有发送成功会给客户端反馈报错. 建议网络情况好的情况下调下以及早让客户端感知                                                                      | 6   | 2     |
+| net.ipv4.tcp_max_syn_backlog | 半链接队列长度. 用于存放syn链接的队列                                                                                                          | 128 | 16384 |
+| net.ipv4.tcp_synack_retries  |                                                                                                                                | 5   | 2     |
+| net.ipv4.tcp_syncookies      | 是否开启syn_cookies，开启后可以防止flood攻击. syn queue满后不再丢包，而是返回cookie。clientack的时候会带cookie，如果有cookie就可以建立链接. 因为cookie占用序列号空间，TCPoption会失效 | 0   | 1     |
+| net.core.somaxconn           | accept queue长度                                                                                                                 | 128 | 16384 |
+| tcp_abort_on_overflow        | accept queue超出后是丢包还是RESET, 默认是0 丢包，在希望客户端重试的情况下. 1是 RESET，如果希望客户端更早的感知队列满                                                      |     |       |
+| tcp_fastopen                 |                                                                                                                                |     |       |
+| net.ipv4.tcp_fin_timeout     |                                                                                                                                |     |       |
 
 ## TCP传输
 
@@ -50,32 +69,36 @@ TCP使用SEQ和ACK来确认保证字节流是有序的和确认字节，SEQ最�
 发送窗口:
 ![img_2.png](/images/img_4.png)
 发送窗口分为4部分
-已经发送并确认. 发送未确认. 待发送可以发送. 超出窗口大小等待可用空间. 
-接受爽口: 
+已经发送并确认. 发送未确认. 待发送可以发送. 超出窗口大小等待可用空间.
+接受爽口:
 接受窗口分为3部分
-已经接受. 接受准备处理. 未接受 
+已经接受. 接受准备处理. 未接受
 
-发送窗口取决于当前的接受窗口. 
+发送窗口取决于当前的接受窗口.
 
-窗口受操作系统缓冲区的约束，也会随之收缩的. 比如当前500个链接，缓存还够. 忽然到了1000个就需要适当较少窗口大小了.而且操作系统的缓冲区除了TCP窗口在用，还会用于应用缓存.
+窗口受操作系统缓冲区的约束，也会随之收缩的. 比如当前500个链接，缓存还够.
+忽然到了1000个就需要适当较少窗口大小了.而且操作系统的缓冲区除了TCP窗口在用，还会用于应用缓存.
 
 ```shell
 # 应用缓存和窗口缓存的比例 应用缓存=buff/(2^tcp_adv_win_scale)
 net.ipv4.tcp_adv_win_scale=1 
 ```
 
-TCP小包优化: 
+窗口收缩，先收缩窗口，在收缩缓存. 防止丢包
+窗口为0 的时候是窗口关闭，窗口关闭后client回定时发送探测包.
+
+### TCP小包优化:
 
 SWS
 
 SWS避免方案
+
 1. 接收方当发现窗口移动小于 min(mss,缓存/2时)通知窗口为0
 2. Nagle算法. 当已发送未确认为0时发送或者数据长度>mss时发送.
 
 TCP延迟确认.
 
 TCP_CORK
-
 
 ## tcp缓冲区
 
@@ -152,3 +175,13 @@ net.ipv4.tcp_mem = 88560 118080 177120
 ```
 
 ss -itmpn 'sport == '9092''
+
+# 拥塞控制
+
+1. 以丢包作为依据
+   使用CUBIC算法.
+
+2. 以带宽作为依据
+   BBR
+
+

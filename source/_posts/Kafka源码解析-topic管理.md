@@ -4,6 +4,44 @@ date: 2023-01-05 23:40:34
 tags:
 ---
 
+# 总结：
+
+创建topic的整体流程如下. 关注状态转换和ISR这块会在对应的章节展开.
+
+```plantuml
+@startuml
+Client -> Broker: CreateTopic
+Broker -> Controller: Handling request(CreateTopic)
+Controller-> Zookeeper: Updated path /brokers/topics/{topic}
+Zookeeper --> ControllerEventManager : process(TopicChange)
+ControllerEventManager-> Controller: processTopicChange
+activate Controller
+Controller-> Controller: onNewPartitionCreation
+note right
+1. Move the newly created partitions to the NewPartition state
+2. Move the newly created partitions from NewPartition->OnlinePartition state
+end note
+activate Controller
+Controller-> broker: Sending LeaderAndIsr request to broker
+Controller-> broker: Sending UpdateMetadata request to brokers
+deactivate Controller
+deactivate Controller
+note left
+**更新controllerContext** 
+controllerContext.setAllTopics(topics)
+deletedTopics.foreach(controllerContext.removeTopic)
+controllerContext.updatePartitionFullReplicaAssignment(topicAndPartition, newReplicaAssignment)
+end note
+
+loop DelayedCreatePartitions
+   Controller->Controller: All partitions have a leader, completing the delayed operation
+end
+Controller -> Broker
+Broker -> Client
+@enduml
+
+```
+
 # 创建
 
 1. 命令行创建topic
@@ -64,7 +102,7 @@ class ZkAdminManager {
 
   try {
     // 验证config、topic是否存在
-    ...
+  ...
     // 设置分区和replicat数量
     val resolvedNumPartitions = if (topic.numPartitions == NO_NUM_PARTITIONS)
       defaultNumPartitions /*num.partitions*/
@@ -114,28 +152,12 @@ class ZkAdminManager {
 ```
 
 此时在zk的/brokers/topics/{topic}中保存信息如下.
+
 ```
 {"partitions":{"11":[1,3,4],"0":[0,1,2],"1":[1,2,3],"2":[2,3,4],"3":[3,4,0],"4":[4,0,1],"5":[0,2,3],"6":[1,3,4],"7":[2,4,0],"8":[3,0,1],"9":[4,1,2],"10":[1,2,3]},"adding_replicas":{},"removing_replicas":{},"version":3}
 ```
 
-
 4. KafkaController监控/brokers/topics/{topic}变化调用processTopicChange()，可以看一下下边的注释. 主要维护controllerContext
-
-先介绍下主要的ControllerContext中几个该章节的用来的成员. 
-``` scala
-class ControllerContext {
- ...
-  val allTopics = mutable.Set.empty[String] // 所有topic的集合
-  var topicIds = mutable.Map.empty[String, Uuid] // topic和topicids的映射
-  val partitionAssignments = mutable.Map.empty[String, mutable.Map[Int, ReplicaAssignment]] // topic、分区、副本之间的关系
-  private val partitionLeadershipInfo = mutable.Map.empty[TopicPartition, LeaderIsrAndControllerEpoch] // Partition和LeaderIsrAndControllerEpoch的关系
-  val partitionsBeingReassigned = mutable.Set.empty[TopicPartition] // 
-  val partitionStates = mutable.Map.empty[TopicPartition, PartitionState] // TopicPartition和PartitionState的关系
-  val replicaStates = mutable.Map.empty[PartitionAndReplica, ReplicaState]
-  val replicasOnOfflineDirs = mutable.Map.empty[Int, Set[TopicPartition]]
-  ...
-}
-```
 
 ```scala
 class KafkaController() {
@@ -154,9 +176,9 @@ class KafkaController() {
     registerPartitionModificationsHandlers(newTopics.toSeq)
     // 从zk新topic的分区和副本信息
     val addedPartitionReplicaAssignment = zkClient.getReplicaAssignmentAndTopicIdForTopics(newTopics)
-     // 从controllerContext中删除topic. 下边单独描述
+    // 从controllerContext中删除topic. 下边单独描述
     deletedTopics.foreach(controllerContext.removeTopic)
-     // 设置topicid
+    // 设置topicid
     processTopicIds(addedPartitionReplicaAssignment)
     //更新 controllerContext的Partition和Replica的关系.
     addedPartitionReplicaAssignment.foreach { case TopicIdReplicaAssignment(_, _, newAssignments) =>
@@ -170,13 +192,12 @@ class KafkaController() {
       val partitionAssignments = addedPartitionReplicaAssignment
         .map { case TopicIdReplicaAssignment(_, _, partitionsReplicas) => partitionsReplicas.keySet }
         .reduce((s1, s2) => s1.union(s2))
-       //创建topic相关变化的监听
+      //创建topic相关变化的监听
       onNewPartitionCreation(partitionAssignments)
     }
   }
 }
 ```
-
 
 ``` scala
   /**
@@ -202,148 +223,3 @@ class KafkaController() {
   }
 
 ```
-
-
-```scala
-class ZkPartitionStateMachine(config: KafkaConfig,
-                              stateChangeLogger: StateChangeLogger,
-                              controllerContext: ControllerContext,
-                              zkClient: KafkaZkClient,
-                              controllerBrokerRequestBatch: ControllerBrokerRequestBatch)
-  extends PartitionStateMachine(controllerContext) {
-
-   override def handleStateChanges(
-                                          partitions: Seq[TopicPartition],
-                                          targetState: PartitionState,
-                                          partitionLeaderElectionStrategyOpt: Option[PartitionLeaderElectionStrategy]
-                                  ): Map[TopicPartition, Either[Throwable, LeaderAndIsr]] = {
-      if (partitions.nonEmpty) {
-         try {
-            // 新建一个Batch. 用于检查要构建的结构是否复位. 详见AbstractControllerBrokerRequestBatch
-            controllerBrokerRequestBatch.newBatch()
-            val result = doHandleStateChanges(
-               partitions,
-               targetState,
-               partitionLeaderElectionStrategyOpt
-            )
-            
-            // 
-            controllerBrokerRequestBatch.sendRequestsToBrokers(controllerContext.epoch)
-            result
-         } catch {
-            case e: ControllerMovedException =>
-               error(s"Controller moved to another broker when moving some partitions to $targetState state", e)
-               throw e
-            case e: Throwable =>
-               error(s"Error while moving some partitions to $targetState state", e)
-               partitions.iterator.map(_ -> Left(e)).toMap
-         }
-      } else {
-         Map.empty
-      }
-   }
-   
-   private def doHandleStateChanges(
-                                           partitions: Seq[TopicPartition],
-                                           targetState: PartitionState,
-                                           partitionLeaderElectionStrategyOpt: Option[PartitionLeaderElectionStrategy]
-                                   ): Map[TopicPartition, Either[Throwable, LeaderAndIsr]] = {
-      val stateChangeLog = stateChangeLogger.withControllerEpoch(controllerContext.epoch)
-      val traceEnabled = stateChangeLog.isTraceEnabled
-      // 将所有不在controllerContext.PartitionState中的partition设置默认状态为NonExistentPartition
-      partitions.foreach(partition => controllerContext.putPartitionStateIfNotExists(partition, NonExistentPartition))
-      val (validPartitions, invalidPartitions) = controllerContext.checkValidPartitionStateChange(partitions, targetState)
-      invalidPartitions.foreach(partition => logInvalidTransition(partition, targetState))
-
-      targetState match {
-         // 将Partition状态转化为NewPartition. 只更新controllerContext.
-         case NewPartition =>
-            validPartitions.foreach { partition =>
-               stateChangeLog.info(s"Changed partition $partition state from ${partitionState(partition)} to $targetState with " +
-                       s"assigned replicas ${controllerContext.partitionReplicaAssignment(partition).mkString(",")}")
-               controllerContext.putPartitionState(partition, NewPartition)
-            }
-            Map.empty
-         case OnlinePartition =>
-            val uninitializedPartitions = validPartitions.filter(partition => partitionState(partition) == NewPartition)
-            val partitionsToElectLeader = validPartitions.filter(partition => partitionState(partition) == OfflinePartition || partitionState(partition) == OnlinePartition)
-            if (uninitializedPartitions.nonEmpty) {
-               val successfulInitializations = initializeLeaderAndIsrForPartitions(uninitializedPartitions)
-               successfulInitializations.foreach { partition =>
-                  stateChangeLog.info(s"Changed partition $partition from ${partitionState(partition)} to $targetState with state " +
-                          s"${controllerContext.partitionLeadershipInfo(partition).get.leaderAndIsr}")
-                  controllerContext.putPartitionState(partition, OnlinePartition)
-               }
-            }
-            if (partitionsToElectLeader.nonEmpty) {
-               val electionResults = electLeaderForPartitions(
-                  partitionsToElectLeader,
-                  partitionLeaderElectionStrategyOpt.getOrElse(
-                     throw new IllegalArgumentException("Election strategy is a required field when the target state is OnlinePartition")
-                  )
-               )
-
-               electionResults.foreach {
-                  case (partition, Right(leaderAndIsr)) =>
-                     stateChangeLog.info(
-                        s"Changed partition $partition from ${partitionState(partition)} to $targetState with state $leaderAndIsr"
-                     )
-                     controllerContext.putPartitionState(partition, OnlinePartition)
-                  case (_, Left(_)) => // Ignore; no need to update partition state on election error
-               }
-
-               electionResults
-            } else {
-               Map.empty
-            }
-         case OfflinePartition | NonExistentPartition =>
-            validPartitions.foreach { partition =>
-               if (traceEnabled)
-                  stateChangeLog.trace(s"Changed partition $partition state from ${partitionState(partition)} to $targetState")
-               controllerContext.putPartitionState(partition, targetState)
-            }
-            Map.empty
-      }
-   }
-}
-```
-
-
-```scala
-一个control
-abstract class AbstractControllerBrokerRequestBatch(config: KafkaConfig,
-                                                    controllerContext: ControllerContext,
-                                                    stateChangeLogger: StateChangeLogger) extends Logging {
-  val controllerId: Int = config.brokerId
-  val leaderAndIsrRequestMap = mutable.Map.empty[Int, mutable.Map[TopicPartition, LeaderAndIsrPartitionState]]
-  val stopReplicaRequestMap = mutable.Map.empty[Int, mutable.Map[TopicPartition, StopReplicaPartitionState]]
-  val updateMetadataRequestBrokerSet = mutable.Set.empty[Int]
-  val updateMetadataRequestPartitionInfoMap = mutable.Map.empty[TopicPartition, UpdateMetadataPartitionState]
-
-
-
-```
-
-
-```scala
-class PartitionModificationsHandler(eventManager: ControllerEventManager, topic: String) extends ZNodeChangeHandler {
-  override val path: String = TopicZNode.path(topic)
-
-  override def handleDataChange(): Unit = eventManager.put(PartitionModifications(topic))
-}
-```
-
-```scala
-
-class ZkReplicaStateMachine(config: KafkaConfig,
-                            stateChangeLogger: StateChangeLogger,
-                            controllerContext: ControllerContext,
-                            zkClient: KafkaZkClient,
-                            controllerBrokerRequestBatch: ControllerBrokerRequestBatch)
-        extends ReplicaStateMachine(controllerContext) with Logging {
-   
-}
-```
-
-
-
