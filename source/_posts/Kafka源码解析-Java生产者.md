@@ -9,7 +9,7 @@ tags:
 Quick Started
 
 ```java
-Properties props=new Properties();
+        Properties props=new Properties();
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,KafkaProperties.KAFKA_SERVER_URL+":"+KafkaProperties.KAFKA_SERVER_PORT);
         props.put(ProducerConfig.CLIENT_ID_CONFIG,"DemoProducer");
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,IntegerSerializer.class.getName());
